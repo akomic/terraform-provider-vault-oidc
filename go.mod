@@ -1,4 +1,4 @@
-module github.com/hashicorp/terraform-provider-scaffolding-framework
+module github.com/akomic/terraform-provider-vaultoidc
 
 go 1.18
 
