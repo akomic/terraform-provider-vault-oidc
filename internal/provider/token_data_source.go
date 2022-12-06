@@ -10,8 +10,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
-	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
@@ -42,46 +41,40 @@ func (d *TokenDataSource) Metadata(ctx context.Context, req datasource.MetadataR
 	resp.TypeName = req.ProviderTypeName + "_token"
 }
 
-func (d *TokenDataSource) GetSchema(ctx context.Context) (tfsdk.Schema, diag.Diagnostics) {
-	return tfsdk.Schema{
+func (d *TokenDataSource) Schema(ctx context.Context, req datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	resp.Schema = schema.Schema{
 		// This description is used by the documentation generator and the language server.
 		MarkdownDescription: "Token data source",
 
-		Attributes: map[string]tfsdk.Attribute{
-			"oidc_provider": {
+		Attributes: map[string]schema.Attribute{
+			"oidc_provider": schema.StringAttribute{
 				MarkdownDescription: "OIDC provider",
 				Required:            true,
 				Optional:            false,
-				Type:                types.StringType,
 			},
-			"application": {
+			"application": schema.StringAttribute{
 				MarkdownDescription: "Application",
 				Required:            true,
 				Optional:            false,
-				Type:                types.StringType,
 			},
-			"response_type": {
+			"response_type": schema.StringAttribute{
 				MarkdownDescription: "Response Type, default 'code'",
 				Optional:            true,
-				Type:                types.StringType,
 			},
-			"redirect_uri": {
+			"redirect_uri": schema.StringAttribute{
 				MarkdownDescription: "Redirect URI, default http://localhost:8000",
 				Optional:            true,
-				Type:                types.StringType,
 			},
-			"scope": {
-				MarkdownDescription: "Scopes",
+			"scope": schema.StringAttribute{
+				MarkdownDescription: "Scopes, default openid k8s-user k8s-groups",
 				Optional:            true,
-				Type:                types.StringType,
 			},
-			"token": {
+			"token": schema.StringAttribute{
 				MarkdownDescription: "Token",
 				Computed:            true,
 				Sensitive:           true,
-				Type:                types.StringType,
 			}},
-	}, nil
+	}
 }
 
 func (d *TokenDataSource) Configure(ctx context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
@@ -182,13 +175,13 @@ func (d *TokenDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 
 	state, err := random32()
 	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("could not generate random state: %w", err))
+		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("could not generate random state: %v", err))
 		return
 	}
 
 	nonce, err := random32()
 	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("could not generate random nonce: %w", err))
+		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("could not generate random nonce: %v", err))
 		return
 	}
 
@@ -197,16 +190,17 @@ func (d *TokenDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 	scope := "openid k8s-user k8s-groups"
 	if !data.Scope.IsNull() {
 		scope = data.Scope.ValueString()
+		tflog.Trace(ctx, fmt.Sprintf("SCOPE: %s", scope))
 	}
 
 	responseType := "code"
 	if !data.ResponseType.IsNull() {
-		scope = data.ResponseType.ValueString()
+		responseType = data.ResponseType.ValueString()
 	}
 
 	redirectURI := "http://localhost:8000"
 	if !data.RedirectURI.IsNull() {
-		scope = data.RedirectURI.ValueString()
+		redirectURI = data.RedirectURI.ValueString()
 	}
 
 	values := &url.Values{

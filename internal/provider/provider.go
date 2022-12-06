@@ -6,10 +6,9 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
+	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -37,28 +36,25 @@ func (p *VaultOidcProvider) Metadata(ctx context.Context, req provider.MetadataR
 	resp.Version = p.version
 }
 
-func (p *VaultOidcProvider) GetSchema(ctx context.Context) (tfsdk.Schema, diag.Diagnostics) {
-	return tfsdk.Schema{
-		Attributes: map[string]tfsdk.Attribute{
-			"address": {
+func (p *VaultOidcProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		Attributes: map[string]schema.Attribute{
+			"address": schema.StringAttribute{
 				MarkdownDescription: "Origin URL of the Vault server. This is a URL with a scheme, a hostname and a port but with no path. May be set via the VAULT_ADDR environment variable.",
 				Required:            false,
 				Optional:            true,
-				Type:                types.StringType,
 			},
-			"token": {
+			"token": schema.StringAttribute{
 				MarkdownDescription: "Vault token that will be used by Terraform to authenticate. May be set via the VAULT_TOKEN environment variable.",
 				Required:            false,
 				Optional:            true,
-				Type:                types.StringType,
 			},
-			"namespace": {
+			"namespace": schema.StringAttribute{
 				MarkdownDescription: "Set the namespace to use. May be set via the VAULT_NAMESPACE environment variable.",
 				Optional:            true,
-				Type:                types.StringType,
 			},
 		},
-	}, nil
+	}
 }
 
 type ClientConfig struct {
