@@ -24,7 +24,7 @@ Token data source
 
 - `redirect_uri` (String) Redirect URI, default http://localhost:8000
 - `response_type` (String) Response Type, default 'code'
-- `scope` (String) Scopes
+- `scope` (String) Scopes, default openid k8s-user k8s-groups
 
 ### Read-Only
 

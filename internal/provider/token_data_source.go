@@ -24,7 +24,8 @@ func NewTokenDataSource() datasource.DataSource {
 
 // TokenDataSource defines the data source implementation.
 type TokenDataSource struct {
-	client *ClientConfig
+	client      *ClientConfig
+	Application *K8SClientResponse
 }
 
 // TokenDataSourceModel describes the data source data model.
@@ -125,6 +126,159 @@ type K8SClientResponse struct {
 	Errors           []string `json:"errors,omitempty"`
 }
 
+func (d *TokenDataSource) GetApplication(ctx context.Context, data *TokenDataSourceModel) (err error) {
+	applicationURI := fmt.Sprintf("%s/v1/%s/identity/oidc/client/%s", d.client.Address, d.client.Namespace, data.Application.ValueString())
+
+	request, err := http.NewRequest("GET", applicationURI, nil)
+	if err != nil {
+		return fmt.Errorf("unable to prepare request %s: err: %v", applicationURI, err)
+	}
+
+	// request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Add("X-Vault-Request", "true")
+	request.Header.Add("X-Vault-Token", d.client.Token)
+
+	applicationResponse, err := d.client.Client.Do(request)
+	if err != nil {
+		return fmt.Errorf("unable to get application against %s: err: %v", applicationURI, err)
+	}
+
+	body, err := io.ReadAll(applicationResponse.Body)
+	if err != nil {
+		return fmt.Errorf("unable to handle application body response %s: err: %v", applicationURI, err)
+	}
+
+	tflog.Trace(ctx, fmt.Sprintf("GET application %s: %s", applicationURI, body))
+
+	var applicationResp *K8SClientResponse
+	err = json.Unmarshal(body, &applicationResp)
+	if err != nil {
+		return fmt.Errorf("unable to unmarshall body response for application: err: %v", err)
+	}
+
+	if applicationResp.Data.ClientID == "" || applicationResp.Data.ClientSecret == "" || applicationResp.Error != "" || len(applicationResp.Errors) > 0 {
+		return fmt.Errorf("invalid application response: Error: %s Desc: %s Errors: %v", applicationResp.Error, applicationResp.ErrorDescription, applicationResp.Errors)
+	}
+
+	d.Application = applicationResp
+	return nil
+}
+
+func (d *TokenDataSource) GetAuthorization(ctx context.Context, data *TokenDataSourceModel) (authorizationResp *K8SAuthResponse, err error) {
+	providerURI := fmt.Sprintf("%s/v1/%s/identity/oidc/provider/%s", d.client.Address, d.client.Namespace, data.OidcProvider.ValueString())
+
+	state, err := random32()
+	if err != nil {
+		return authorizationResp, fmt.Errorf("could not generate random state: %v", err)
+	}
+
+	nonce, err := random32()
+	if err != nil {
+		return authorizationResp, fmt.Errorf("could not generate random nonce: %v", err)
+	}
+
+	if data.Scope.IsNull() {
+		data.Scope = types.StringValue("openid k8s-user k8s-groups")
+	}
+	tflog.Trace(ctx, fmt.Sprintf("SCOPE: %s", data.Scope))
+
+	if data.ResponseType.IsNull() {
+		data.ResponseType = types.StringValue("code")
+	}
+	tflog.Trace(ctx, fmt.Sprintf("RESPONSETYPE: %s", data.ResponseType))
+
+	if data.RedirectURI.IsNull() {
+		data.RedirectURI = types.StringValue("http://localhost:8000")
+	}
+	tflog.Trace(ctx, fmt.Sprintf("REDIRECTURI: %s", data.RedirectURI))
+
+	values := &url.Values{
+		"scope":         {data.Scope.ValueString()},
+		"response_type": {data.ResponseType.ValueString()},
+		"client_id":     {d.Application.Data.ClientID},
+		"redirect_uri":  {data.RedirectURI.ValueString()},
+		"state":         {state},
+		"nonce":         {nonce},
+	}
+
+	request, err := http.NewRequest("POST", fmt.Sprintf("%s/authorize", providerURI), strings.NewReader(values.Encode()))
+	if err != nil {
+		return authorizationResp, fmt.Errorf("unable to prepare request %s/authorize: err: %v", providerURI, err)
+	}
+
+	request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Add("X-Vault-Request", "true")
+	request.Header.Add("X-Vault-Token", d.client.Token)
+
+	authorizeResponse, err := d.client.Client.Do(request)
+	if err != nil {
+		return authorizationResp, fmt.Errorf("unable to get authorization against %s/authorize: err: %v", providerURI, err)
+	}
+
+	body, err := io.ReadAll(authorizeResponse.Body)
+	if err != nil {
+		return authorizationResp, fmt.Errorf("unable to handle token body response %s/authorize: err: %v", providerURI, err)
+	}
+
+	tflog.Trace(ctx, fmt.Sprintf("POST /authorize: %s", body))
+
+	err = json.Unmarshal(body, &authorizationResp)
+	if err != nil {
+		return authorizationResp, fmt.Errorf("unable to unmarshall body response /authorize: err: %v", err)
+	}
+
+	if authorizationResp.Error != "" || authorizationResp.Errors != "" {
+		return authorizationResp, fmt.Errorf("invalid authorize response: Error: %s Desc: %s Errors: %s", authorizationResp.Error, authorizationResp.ErrorDescription, authorizationResp.Errors)
+	}
+
+	if state != authorizationResp.State {
+		return authorizationResp, fmt.Errorf("invalid state returned %s != %s", state, authorizationResp.State)
+	}
+
+	return authorizationResp, nil
+}
+
+func (d *TokenDataSource) GetToken(ctx context.Context, data *TokenDataSourceModel, code string) (tokenResp *K8STokenResponse, err error) {
+	providerURI := fmt.Sprintf("%s/v1/%s/identity/oidc/provider/%s", d.client.Address, d.client.Namespace, data.OidcProvider.ValueString())
+
+	values := &url.Values{
+		"code":         {code},
+		"grant_type":   {"authorization_code"},
+		"redirect_uri": {data.RedirectURI.ValueString()},
+	}
+
+	request, err := http.NewRequest("POST", fmt.Sprintf("%s/token", providerURI), strings.NewReader(values.Encode()))
+	if err != nil {
+		return tokenResp, fmt.Errorf("unable to prepare request %s/token: err: %v", providerURI, err)
+	}
+
+	request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	request.SetBasicAuth(d.Application.Data.ClientID, d.Application.Data.ClientSecret)
+
+	tokenResponse, err := d.client.Client.Do(request)
+	if err != nil {
+		return tokenResp, fmt.Errorf("unable to get token against %s/token: err: %v", providerURI, err)
+	}
+
+	body, err := io.ReadAll(tokenResponse.Body)
+	if err != nil {
+		return tokenResp, fmt.Errorf("unable to handle token body response %s/token: err: %v", providerURI, err)
+	}
+
+	tflog.Trace(ctx, fmt.Sprintf("POST /token: %s", body))
+
+	err = json.Unmarshal(body, &tokenResp)
+	if err != nil {
+		return tokenResp, fmt.Errorf("unable to unmarshall body response /token: err: %v", err)
+	}
+
+	if tokenResp.Error != "" || tokenResp.Errors != "" {
+		return tokenResp, fmt.Errorf("invalid token response: Error: %s Desc: %s Errors: %s", tokenResp.Error, tokenResp.ErrorDescription, tokenResp.Errors)
+	}
+
+	return tokenResp, nil
+}
+
 func (d *TokenDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var data TokenDataSourceModel
 
@@ -135,183 +289,27 @@ func (d *TokenDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 		return
 	}
 
-	applicationURI := fmt.Sprintf("%s/v1/%s/identity/oidc/client/%s", d.client.Address, d.client.Namespace, data.Application.ValueString())
-
-	request, err := http.NewRequest("GET", applicationURI, nil)
+	err := d.GetApplication(ctx, &data)
 	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to prepare request %s: err: %v", applicationURI, err))
+		resp.Diagnostics.AddError("Client Error", err.Error())
 		return
 	}
 
-	// request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Add("X-Vault-Request", "true")
-	request.Header.Add("X-Vault-Token", d.client.Token)
-
-	applicationResponse, err := d.client.Client.Do(request)
+	authorizationResp, err := d.GetAuthorization(ctx, &data)
 	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to get application against %s: err: %v", applicationURI, err))
+		resp.Diagnostics.AddError("Client Error", err.Error())
 		return
 	}
 
-	body, err := io.ReadAll(applicationResponse.Body)
+	tokenResp, err := d.GetToken(ctx, &data, authorizationResp.Code)
 	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to handle application body response %s: err: %v", applicationURI, err))
+		resp.Diagnostics.AddError("Client Error", err.Error())
 		return
 	}
-
-	tflog.Trace(ctx, fmt.Sprintf("GET application %s: %s", applicationURI, body))
-
-	var applicationResp K8SClientResponse
-	err = json.Unmarshal(body, &applicationResp)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to unmarshall body response for application: err: %v", err))
-		return
-	}
-
-	if applicationResp.Data.ClientID == "" || applicationResp.Data.ClientSecret == "" || applicationResp.Error != "" || len(applicationResp.Errors) > 0 {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("invalid application response: Error: %s Desc: %s Errors: %v", applicationResp.Error, applicationResp.ErrorDescription, applicationResp.Errors))
-		return
-	}
-
-	state, err := random32()
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("could not generate random state: %v", err))
-		return
-	}
-
-	nonce, err := random32()
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("could not generate random nonce: %v", err))
-		return
-	}
-
-	providerURI := fmt.Sprintf("%s/v1/%s/identity/oidc/provider/%s", d.client.Address, d.client.Namespace, data.OidcProvider.ValueString())
-
-	scope := "openid k8s-user k8s-groups"
-	if !data.Scope.IsNull() {
-		scope = data.Scope.ValueString()
-		tflog.Trace(ctx, fmt.Sprintf("SCOPE: %s", scope))
-	}
-
-	responseType := "code"
-	if !data.ResponseType.IsNull() {
-		responseType = data.ResponseType.ValueString()
-	}
-
-	redirectURI := "http://localhost:8000"
-	if !data.RedirectURI.IsNull() {
-		redirectURI = data.RedirectURI.ValueString()
-	}
-
-	values := &url.Values{
-		"scope":         {scope},
-		"response_type": {responseType},
-		"client_id":     {applicationResp.Data.ClientID},
-		"redirect_uri":  {redirectURI},
-		"state":         {state},
-		"nonce":         {nonce},
-	}
-
-	request, err = http.NewRequest("POST", fmt.Sprintf("%s/authorize", providerURI), strings.NewReader(values.Encode()))
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to prepare request %s/authorize: err: %v", providerURI, err))
-		return
-	}
-
-	request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Add("X-Vault-Request", "true")
-	request.Header.Add("X-Vault-Token", d.client.Token)
-
-	authorizeResponse, err := d.client.Client.Do(request)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to get authorization against %s/authorize: err: %v", providerURI, err))
-		return
-	}
-
-	body, err = io.ReadAll(authorizeResponse.Body)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to handle token body response %s/authorize: err: %v", providerURI, err))
-		return
-	}
-
-	tflog.Trace(ctx, fmt.Sprintf("POST /authorize: %s", body))
-
-	var r K8SAuthResponse
-	err = json.Unmarshal(body, &r)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to unmarshall body response /authorize: err: %v", err))
-		return
-	}
-
-	if r.Error != "" || r.Errors != "" {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("invalid authorize response: Error: %s Desc: %s Errors: %s", r.Error, r.ErrorDescription, r.Errors))
-		return
-	}
-
-	if state != r.State {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("invalid state returned %s != %s", state, r.State))
-		return
-	}
-
-	values = &url.Values{
-		"code":         {r.Code},
-		"grant_type":   {"authorization_code"},
-		"redirect_uri": {redirectURI},
-	}
-
-	request, err = http.NewRequest("POST", fmt.Sprintf("%s/token", providerURI), strings.NewReader(values.Encode()))
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to prepare request %s/token: err: %v", providerURI, err))
-		return
-	}
-
-	request.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	request.SetBasicAuth(applicationResp.Data.ClientID, applicationResp.Data.ClientSecret)
-
-	tokenResponse, err := d.client.Client.Do(request)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to get token against %s/token: err: %v", providerURI, err))
-		return
-	}
-
-	body, err = io.ReadAll(tokenResponse.Body)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to handle token body response %s/token: err: %v", providerURI, err))
-		return
-	}
-
-	tflog.Trace(ctx, fmt.Sprintf("POST /token: %s", body))
-
-	var tokenResp *K8STokenResponse
-	err = json.Unmarshal(body, &tokenResp)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("unable to unmarshall body response /token: err: %v", err))
-		return
-	}
-
-	if tokenResp.Error != "" || tokenResp.Errors != "" {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("invalid token response: Error: %s Desc: %s Errors: %s", tokenResp.Error, tokenResp.ErrorDescription, tokenResp.Errors))
-		return
-	}
-
-	// If applicable, this is a great opportunity to initialize any necessary
-	// provider client data and make a call using it.
-	// httpResp, err := d.client.Do(httpReq)
-	// if err != nil {
-	//     resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read token, got error: %s", err))
-	//     return
-	// }
-
-	// For the purposes of this token code, hardcoding a response value to
-	// save into the Terraform state.
-	// data.Id = types.StringValue("token-id")
 
 	data.Token = types.StringValue(tokenResp.IDToken)
 
 	tflog.Trace(ctx, fmt.Sprintf("output %+v", data))
-	// Write logs using the tflog package
-	// Documentation: https://terraform.io/plugin/log
-	// tflog.Trace(ctx, "read a data source")
 
 	// Save data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)

@@ -65,7 +65,14 @@ type ClientConfig struct {
 }
 
 func (p *VaultOidcProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
-	var data VaultOidcProviderModel
+	var (
+		data VaultOidcProviderModel
+		ok   bool
+	)
+
+	cc := &ClientConfig{
+		Client: http.DefaultClient,
+	}
 
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
 
@@ -73,54 +80,28 @@ func (p *VaultOidcProvider) Configure(ctx context.Context, req provider.Configur
 		return
 	}
 
-	address := os.Getenv("VAULT_ADDR")
-	token := os.Getenv("VAULT_TOKEN")
-	namespace := ""
-	if value, ok := os.LookupEnv("VAULT_NAMESPACE"); ok {
-		namespace = value
-	} else {
-		namespace = "admin"
-	}
-
 	if !data.Address.IsNull() {
-		address = data.Address.ValueString()
-	}
-
-	if !data.Token.IsNull() {
-		token = data.Token.ValueString()
-	}
-
-	if !data.Namespace.IsNull() {
-		namespace = data.Namespace.ValueString()
-	}
-
-	if address == "" {
+		cc.Address = data.Address.ValueString()
+	} else if cc.Address, ok = os.LookupEnv("VAULT_ADDR"); !ok {
 		resp.Diagnostics.AddError("Provider Error", "address is quired")
 		return
 	}
 
-	if token == "" {
+	if !data.Token.IsNull() {
+		cc.Token = data.Token.ValueString()
+	} else if cc.Token, ok = os.LookupEnv("VAULT_TOKEN"); !ok {
 		resp.Diagnostics.AddError("Provider Error", "token is quired")
 		return
 	}
 
-	// Configuration values are now available.
-	// if data.Endpoint.IsNull() { /* ... */ }
+	if !data.Namespace.IsNull() {
+		cc.Namespace = data.Namespace.ValueString()
+	} else if cc.Namespace, ok = os.LookupEnv("VAULT_NAMESPACE"); !ok {
+		cc.Namespace = "admin"
+	}
 
-	// Example client configuration for data sources and resources
-	client := http.DefaultClient
-	resp.DataSourceData = &ClientConfig{
-		Client:    client,
-		Address:   address,
-		Token:     token,
-		Namespace: namespace,
-	}
-	resp.ResourceData = &ClientConfig{
-		Client:    client,
-		Address:   address,
-		Token:     token,
-		Namespace: namespace,
-	}
+	resp.DataSourceData = cc
+	resp.ResourceData = cc
 }
 
 func (p *VaultOidcProvider) Resources(ctx context.Context) []func() resource.Resource {
